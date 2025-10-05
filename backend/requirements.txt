@@ -8,7 +8,9 @@ python-multipart==0.0.6
 # Lightweight ML dependencies
 scikit-learn==1.3.2
 numpy==1.24.3
-
+transformers==4.36.0
+torch==2.1.0+cpu
+-f https://download.pytorch.org/whl/torch_stable.html
 # Configuration
 python-dotenv==1.0.0
 pydantic-settings==2.0.3
