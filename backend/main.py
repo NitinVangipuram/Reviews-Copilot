@@ -502,7 +502,7 @@ async def process_reviews(api_key: str = Depends(verify_api_key)):
         return {
             "message": f"Successfully processed {processed_count} reviews",
             "processing_time": f"{processing_time:.3f}s",
-            "total_reviews": len(reviews)
+            "total_reviews": str(len(reviews))  # Convert to string to match response model
         }
     
     except HTTPException:
