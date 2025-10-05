@@ -56,7 +56,7 @@ class AIService:
         }
         
         # Initialize models
-                self._load_ai_models()
+        self._load_ai_models()
         
         # Initialize search index
         self._initialize_search_index()
@@ -69,16 +69,16 @@ class AIService:
             
         try:
             # Load sentiment analysis pipeline
-                self.sentiment_pipeline = pipeline(
-                    "sentiment-analysis",
+            self.sentiment_pipeline = pipeline(
+                "sentiment-analysis",
                 model="cardiffnlp/twitter-roberta-base-sentiment-latest",
                 return_all_scores=True
-                )
+            )
             logger.info("Sentiment analysis pipeline loaded successfully")
             
             # Load summarization pipeline
-                self.summarization_pipeline = pipeline(
-                    "summarization",
+            self.summarization_pipeline = pipeline(
+                "summarization",
                 model="facebook/bart-large-cnn",
                 max_length=100,
                 min_length=20
@@ -413,7 +413,7 @@ Restaurant Manager Response:"""
             results = []
             for idx in top_indices:
                 if idx < len(self.review_ids):
-                results.append({
+                    results.append({
                         'id': self.review_ids[idx],
                         'similarity': float(similarities[idx]),
                         'text': self.review_texts[idx]
@@ -543,4 +543,3 @@ Restaurant Manager Response:"""
 
 # Create a global instance
 ai_service = AIService()
-
