@@ -354,14 +354,20 @@ async def suggest_reply(review_id: int, api_key: str = Depends(verify_api_key)):
         rating = review_data['rating']
         
         # Analyze sentiment and topic if not already done
-        sentiment = review_data.get('sentiment') or ai_service.analyze_sentiment(review_text)
+        sentiment_data = None
+        if not review_data.get('sentiment'):
+            sentiment_data = ai_service.analyze_sentiment(review_text)
+            sentiment = sentiment_data['label']
+        else:
+            sentiment = review_data.get('sentiment')
+            
         topic = review_data.get('topic') or ai_service.extract_topic(review_text)
         
         # Update the review with AI analysis results
-        if not review_data.get('sentiment') or not review_data.get('topic'):
+        if sentiment_data or not review_data.get('topic'):
             db_manager.update_review_ai_data(review_id, sentiment, topic)
         
-        # Generate reply using AI service
+        # Pass sentiment info to generate reply
         reply_data = ai_service.generate_reply(review_text, rating, sentiment, None)
         
         return SuggestReplyResponse(
