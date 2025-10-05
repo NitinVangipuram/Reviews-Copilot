@@ -517,15 +517,18 @@ async def process_reviews(api_key: str = Depends(verify_api_key)):
 if __name__ == "__main__":
     import uvicorn
     
+    # Get port from environment variable (Render requirement)
+    port = int(os.environ.get("PORT", settings.port))
+    
     # Configure uvicorn based on settings
     uvicorn_config = {
         "app": app,
-        "host": settings.host,
-        "port": settings.port,
+        "host": "0.0.0.0",  # Must be 0.0.0.0 for Render
+        "port": port,       # Use PORT env variable
         "log_level": settings.log_level.lower(),
-        "reload": settings.reload,
+        "reload": False,    # Disable reload in production
         "access_log": settings.debug
     }
     
-    logger.info(f"Starting server on {settings.host}:{settings.port}")
+    logger.info(f"Starting server on 0.0.0.0:{port}")
     uvicorn.run(**uvicorn_config)
