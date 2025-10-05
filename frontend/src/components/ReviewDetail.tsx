@@ -190,9 +190,9 @@ const ReviewDetail = () => {
             <div>
               <strong>Sentiment:</strong>
               <div style={{ marginTop: '0.25rem' }}>
-                <span className={getSentimentClass(review.sentiment)}>
-                  {review.sentiment}
-                </span>
+                <span className={getSentimentClass(review.sentiment?.replace(/^"|"$/g, ''))}>
+  {review.sentiment?.replace(/^"|"$/g, '')}
+</span>
               </div>
             </div>
           )}

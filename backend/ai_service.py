@@ -117,11 +117,11 @@ class AIService:
             except Exception as fallback_error:
                 logger.error(f"Error loading fallback models: {str(fallback_error)}")
     
-    def analyze_sentiment(self, text: str) -> Dict[str, Any]:
+    def analyze_sentiment(self, text: str) -> str:
         """Analyze sentiment using Hugging Face models"""
         if not self.sentiment_pipeline:
-            return {"label": "neutral", "score": 0.5, "confidence": "low"}
-        
+            return "neutral"
+
         try:
             start_time = time.time()
             result = self.sentiment_pipeline(text)
@@ -161,12 +161,7 @@ class AIService:
             processing_time = time.time() - start_time
             self.performance_metrics['sentiment_analysis_time'].append(processing_time)
             
-            return {
-                "label": sentiment,
-                "score": confidence,
-                "confidence": conf_level,
-                "processing_time": processing_time
-            }
+            return sentiment
             
         except Exception as e:
             logger.error(f"Error in sentiment analysis: {str(e)}")

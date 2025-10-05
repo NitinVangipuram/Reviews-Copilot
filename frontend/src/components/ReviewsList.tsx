@@ -86,7 +86,7 @@ const ReviewsList = () => {
       </div>
     );
   }
-
+console.log(reviews);
   return (
     <div>
       <div className="card">
@@ -194,9 +194,9 @@ const ReviewsList = () => {
                     </td>
                     <td>
                       {review.sentiment && (
-                        <span className={getSentimentClass(review.sentiment)}>
-                          {review.sentiment}
-                        </span>
+                            <span className={getSentimentClass(review.sentiment?.replace(/^"|"$/g, ''))}>
+  {review.sentiment?.replace(/^"|"$/g, '')}
+</span>
                       )}
                     </td>
                     <td>

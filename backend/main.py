@@ -1,3 +1,4 @@
+
 from fastapi import FastAPI, HTTPException, Depends, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
@@ -354,20 +355,14 @@ async def suggest_reply(review_id: int, api_key: str = Depends(verify_api_key)):
         rating = review_data['rating']
         
         # Analyze sentiment and topic if not already done
-        sentiment_data = None
-        if not review_data.get('sentiment'):
-            sentiment_data = ai_service.analyze_sentiment(review_text)
-            sentiment = sentiment_data['label']
-        else:
-            sentiment = review_data.get('sentiment')
-            
+        sentiment = review_data.get('sentiment') or ai_service.analyze_sentiment(review_text)
         topic = review_data.get('topic') or ai_service.extract_topic(review_text)
         
         # Update the review with AI analysis results
-        if sentiment_data or not review_data.get('topic'):
+        if not review_data.get('sentiment') or not review_data.get('topic'):
             db_manager.update_review_ai_data(review_id, sentiment, topic)
         
-        # Pass sentiment info to generate reply
+        # Generate reply using AI service
         reply_data = ai_service.generate_reply(review_text, rating, sentiment, None)
         
         return SuggestReplyResponse(
@@ -462,55 +457,44 @@ async def search_similar_reviews(
             detail=f"Error searching reviews: {str(e)}"
         )
 
-# Batch process reviews for sentiment and topic analysis
+import json
+
 @app.post("/process-reviews", response_model=Dict[str, str])
 async def process_reviews(api_key: str = Depends(verify_api_key)):
     """Process all reviews to add sentiment and topic analysis"""
     try:
-        if not settings.enable_batch_processing:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Batch processing is currently disabled"
-            )
-        
-        if not settings.ai_enabled:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="AI processing is currently disabled"
-            )
-        
         start_time = time.time()
         
-        # Get reviews without sentiment or topic using database manager
         query = "SELECT id, text FROM reviews WHERE sentiment IS NULL OR topic IS NULL"
         reviews = db_manager.execute_query(query)
-        
+        print(reviews)
         processed_count = 0
+
         for review_id, text in reviews:
             try:
                 sentiment = ai_service.analyze_sentiment(text)
+                print(sentiment)
                 topic = ai_service.extract_topic(text)
-                
-                # Update using database manager
-                success = db_manager.update_review_ai_data(review_id, sentiment, topic)
+
+                # ✅ Convert dict to JSON string before saving
+                sentiment_json = json.dumps(sentiment)
+                success = db_manager.update_review_ai_data(review_id, sentiment_json, topic)
                 if success:
                     processed_count += 1
-                    
+
             except Exception as e:
                 logger.warning(f"Failed to process review {review_id}: {str(e)}")
                 continue
-        
+
         processing_time = time.time() - start_time
-        
-        # Refresh search index after processing
         ai_service.refresh_search_index()
         
         return {
             "message": f"Successfully processed {processed_count} reviews",
             "processing_time": f"{processing_time:.3f}s",
-            "total_reviews": str(len(reviews))  # Convert to string to match response model
+            "total_reviews": str(len(reviews))
         }
-    
+
     except HTTPException:
         raise
     except Exception as e:
