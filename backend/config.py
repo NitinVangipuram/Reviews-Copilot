@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     
     # CORS Configuration
     allowed_origins: List[str] = Field(
-        default=["http://localhost:3000", "http://localhost:8080"],
+        default=["http://localhost:3000", "http://localhost:8080","https://reviewscopilot.vercel.app"],
         env="ALLOWED_ORIGINS"
     )
     allowed_methods: List[str] = Field(
