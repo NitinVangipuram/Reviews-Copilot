@@ -57,6 +57,7 @@ export interface SearchResponse {
   query: string;
   results: Array<{
     review: ReviewResponse;
+    text: string;
     similarity: number;
   }>;
   total: number;

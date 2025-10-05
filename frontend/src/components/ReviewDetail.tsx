@@ -54,6 +54,7 @@ const ReviewDetail = () => {
     try {
       setSearching(true);
       const data = await reviewsAPI.searchSimilar(searchQuery, 5);
+      console.log(data);
       setSimilarReviews(data.results);
     } catch (err) {
       console.error('Error searching similar reviews:', err);
@@ -129,7 +130,7 @@ const ReviewDetail = () => {
       </div>
     );
   }
-
+console.log(similarReviews)
   return (
     <div>
       <div style={{ marginBottom: '1rem' }}>
@@ -288,16 +289,13 @@ const ReviewDetail = () => {
             {similarReviews.map((result, index) => (
               <div key={index} className="search-result">
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '0.5rem' }}>
-                  <strong>Review #{result.review.id}</strong>
+                  
                   <span className="similarity-score">
                     {(result.similarity * 100).toFixed(1)}% similar
                   </span>
                 </div>
                 <div style={{ color: '#6b7280', fontSize: '0.875rem' }}>
-                  {result.review.text.length > 200 
-                    ? `${result.review.text.substring(0, 200)}...` 
-                    : result.review.text
-                  }
+                  {result.text}
                 </div>
               </div>
             ))}

@@ -1,50 +1,53 @@
 import os
-import re
 import time
 import json
-import hashlib
-from typing import Dict, List, Any, Optional, Tuple
 import logging
+from typing import Dict, List, Any, Optional
 from functools import lru_cache
-from concurrent.futures import ThreadPoolExecutor
-import threading
-import asyncio
-
-try:
-    from transformers import pipeline, AutoTokenizer, AutoModelForCausalLM, AutoModelForSequenceClassification
-    import torch
-    TRANSFORMERS_AVAILABLE = True
-except ImportError:
-    TRANSFORMERS_AVAILABLE = False
-    logging.warning("Transformers not available, using fallback methods")
+import random
 
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.decomposition import TruncatedSVD
-from sklearn.preprocessing import normalize
+import requests
+from openai import OpenAI
 
 from config import get_settings
 from database import get_db_manager
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+from dotenv import load_dotenv
+load_dotenv()
 
 class AIService:
-    """Advanced AI service with proper Hugging Face integration and dynamic responses"""
+    """AI service using Hugging Face Inference API + DeepSeek for text generation"""
     
     def __init__(self):
-        self.sentiment_pipeline = None
-        self.summarization_pipeline = None
-        self.text_generation_pipeline = None
-        self.topic_classification_pipeline = None
+        # Hugging Face API configuration
+        self.hf_api_token = os.environ.get("HUGGINGFACE_API_TOKEN")
+        self.hf_api_url = "https://api-inference.huggingface.co/models"
+        
+        # Initialize OpenAI client with HF Router for DeepSeek
+        self.hf_token = os.environ.get("HF_TOKEN", self.hf_api_token)
+        self.openai_client = OpenAI(
+            base_url="https://router.huggingface.co/v1",
+            api_key=self.hf_token,
+        )
+        
+        # Model endpoints
+        self.models = {
+            'sentiment': "cardiffnlp/twitter-roberta-base-sentiment-latest",
+            'summarization': "facebook/bart-large-cnn",
+            'text_generation': "deepseek-ai/DeepSeek-V3.2-Exp:novita",  # Using DeepSeek
+            'emotion': "cardiffnlp/twitter-roberta-base-emotion"
+        }
+        
+        # Local components
         self.tfidf_vectorizer = None
         self.tfidf_matrix = None
         self.review_texts = []
         self.review_ids = []
-        self._model_cache = {}
-        self._cache_lock = threading.Lock()
-        self._executor = ThreadPoolExecutor(max_workers=4)
         self._db_manager = get_db_manager()
         
         # Performance tracking
@@ -55,108 +58,70 @@ class AIService:
             'search_time': []
         }
         
-        # Initialize models
-        self._load_ai_models()
-        
         # Initialize search index
         self._initialize_search_index()
+        
+        logger.info("AI Service initialized with Hugging Face models + DeepSeek for text generation")
     
-    def _load_ai_models(self):
-        """Load all AI models with proper error handling and fallbacks"""
-        if not TRANSFORMERS_AVAILABLE:
-            logger.warning("Transformers not available, using fallback methods")
-            return
-            
-        try:
-            # Load sentiment analysis pipeline
-            self.sentiment_pipeline = pipeline(
-                "sentiment-analysis",
-                model="cardiffnlp/twitter-roberta-base-sentiment-latest",
-                return_all_scores=True
-            )
-            logger.info("Sentiment analysis pipeline loaded successfully")
-            
-            # Load summarization pipeline
-            self.summarization_pipeline = pipeline(
-                "summarization",
-                model="facebook/bart-large-cnn",
-                max_length=100,
-                min_length=20
-            )
-            logger.info("Summarization pipeline loaded successfully")
-            
-            # Load topic classification pipeline
-            self.topic_classification_pipeline = pipeline(
-                "text-classification",
-                model="cardiffnlp/twitter-roberta-base-emotion",
-                return_all_scores=True
-            )
-            logger.info("Topic classification pipeline loaded successfully")
-            
-            # Load text generation pipeline
-            self.text_generation_pipeline = pipeline(
-                "text-generation",
-                model="microsoft/DialoGPT-medium",
-                max_length=200,
-                do_sample=True,
-                temperature=0.8,
-                top_p=0.9,
-                pad_token_id=50256,
-                eos_token_id=50256
-            )
-            logger.info("Text generation pipeline loaded successfully")
-            
-        except Exception as e:
-            logger.error(f"Error loading AI models: {str(e)}")
-            # Fallback to simpler models
+    def _query_huggingface(self, model_name: str, payload: Dict, retry: int = 3) -> Optional[Dict]:
+        """Query Hugging Face Inference API"""
+        headers = {"Content-Type": "application/json"}
+        
+        # Only add auth if token is valid
+        if self.hf_api_token and len(self.hf_api_token) > 10 and self.hf_api_token.startswith('hf_'):
+            headers["Authorization"] = f"Bearer {self.hf_api_token}"
+        else:
+            logger.info("Using Hugging Face API without authentication (rate limited)")
+        
+        url = f"{self.hf_api_url}/{model_name}"
+        
+        for attempt in range(retry):
             try:
-                self.sentiment_pipeline = pipeline("sentiment-analysis")
-                self.summarization_pipeline = pipeline("summarization")
-                self.text_generation_pipeline = pipeline("text-generation", model="gpt2")
-                logger.info("Fallback models loaded successfully")
-            except Exception as fallback_error:
-                logger.error(f"Error loading fallback models: {str(fallback_error)}")
+                response = requests.post(url, headers=headers, json=payload, timeout=15)
+                
+                if response.status_code == 200:
+                    return response.json()
+                elif response.status_code == 503:
+                    # Model is loading, wait and retry
+                    logger.warning(f"Model loading, attempt {attempt + 1}/{retry}")
+                    time.sleep(3)
+                elif response.status_code == 403:
+                    # Auth error - fall back to no auth or use fallback methods
+                    logger.warning(f"Authentication error, using fallback methods")
+                    return None
+                elif response.status_code == 429:
+                    # Rate limit - wait longer
+                    logger.warning(f"Rate limited, waiting...")
+                    time.sleep(5)
+                else:
+                    logger.error(f"API error: {response.status_code} - {response.text}")
+                    return None
+            except Exception as e:
+                logger.error(f"Error querying Hugging Face API: {str(e)}")
+                if attempt < retry - 1:
+                    time.sleep(2)
+        
+        return None
     
     def analyze_sentiment(self, text: str) -> str:
-        """Analyze sentiment using Hugging Face models"""
-        if not self.sentiment_pipeline:
-            return "neutral"
-
+        """Analyze sentiment using remote Hugging Face API"""
         try:
             start_time = time.time()
-            result = self.sentiment_pipeline(text)
             
-            # Process the result based on model output
-            if isinstance(result, list) and len(result) > 0:
-                if isinstance(result[0], list):
-                    # Multiple scores returned
-                    scores = result[0]
-                    best_score = max(scores, key=lambda x: x['score'])
-                    sentiment = best_score['label'].lower()
-                    confidence = best_score['score']
-                else:
-                    # Single score returned
-                    sentiment = result[0]['label'].lower()
-                    confidence = result[0]['score']
-            else:
-                sentiment = "neutral"
-                confidence = 0.5
+            # Truncate text if too long
+            text = text[:512]
             
-            # Normalize sentiment labels
-            if 'positive' in sentiment or 'joy' in sentiment or 'love' in sentiment:
-                sentiment = "positive"
-            elif 'negative' in sentiment or 'sad' in sentiment or 'anger' in sentiment:
-                sentiment = "negative"
-            else:
-                sentiment = "neutral"
+            result = self._query_huggingface(
+                self.models['sentiment'],
+                {"inputs": text}
+            )
             
-            # Determine confidence level
-            if confidence > 0.8:
-                conf_level = "high"
-            elif confidence > 0.6:
-                conf_level = "medium"
+            if result and isinstance(result, list) and len(result) > 0:
+                # Get the label with highest score
+                best_score = max(result[0], key=lambda x: x['score'])
+                sentiment = best_score['label'].lower()
             else:
-                conf_level = "low"
+                sentiment = self._analyze_sentiment_fallback(text)
             
             processing_time = time.time() - start_time
             self.performance_metrics['sentiment_analysis_time'].append(processing_time)
@@ -165,63 +130,75 @@ class AIService:
             
         except Exception as e:
             logger.error(f"Error in sentiment analysis: {str(e)}")
-            return {"label": "neutral", "score": 0.5, "confidence": "low"}
+            return self._analyze_sentiment_fallback(text)
     
-    def extract_topic(self, text: str) -> str:
-        """Extract topic using keyword-based approach for better accuracy"""
-        # Use the improved fallback method which works better for restaurant reviews
-        return self._extract_topic_fallback(text)
-    
-    def _extract_topic_fallback(self, text: str) -> str:
-        """Fallback topic extraction using keyword matching"""
+    def _analyze_sentiment_fallback(self, text: str) -> str:
+        """Fallback sentiment analysis using keyword matching"""
         text_lower = text.lower()
         
-        # Define topic keywords with more comprehensive matching
+        positive_words = ['great', 'excellent', 'amazing', 'wonderful', 'fantastic', 'love', 'best', 'perfect', 'delicious', 'awesome']
+        negative_words = ['bad', 'terrible', 'awful', 'horrible', 'worst', 'disgusting', 'disappointing', 'poor', 'hate']
+        
+        pos_count = sum(1 for word in positive_words if word in text_lower)
+        neg_count = sum(1 for word in negative_words if word in text_lower)
+        
+        if pos_count > neg_count:
+            return "positive"
+        elif neg_count > pos_count:
+            return "negative"
+        else:
+            return "neutral"
+    
+    def extract_topic(self, text: str) -> str:
+        """Extract topic using keyword-based approach"""
+        text_lower = text.lower()
+        
         topic_keywords = {
-            'food': ['food', 'meal', 'dish', 'taste', 'flavor', 'delicious', 'tasty', 'cooking', 'chef', 'menu', 'recipe', 'eat', 'dining', 'restaurant', 'cuisine', 'ingredients', 'cooked', 'fresh', 'quality'],
-            'service': ['service', 'staff', 'waiter', 'waitress', 'server', 'friendly', 'helpful', 'attentive', 'professional', 'served', 'serving', 'assistance', 'help', 'care', 'attention'],
-            'atmosphere': ['atmosphere', 'ambiance', 'decor', 'music', 'lighting', 'cozy', 'romantic', 'loud', 'quiet', 'environment', 'setting', 'mood', 'vibe', 'place', 'space'],
-            'price': ['price', 'cost', 'expensive', 'cheap', 'affordable', 'value', 'money', 'bill', 'payment', 'worth', 'budget', 'expensive', 'overpriced', 'reasonable'],
-            'location': ['location', 'parking', 'convenient', 'accessible', 'address', 'nearby', 'distance', 'place', 'area', 'neighborhood', 'street'],
-            'cleanliness': ['clean', 'dirty', 'hygiene', 'sanitary', 'tidy', 'messy', 'spotless', 'fresh', 'maintenance', 'condition']
+            'food': ['food', 'meal', 'dish', 'taste', 'flavor', 'delicious', 'tasty', 'cooking', 'chef', 'menu'],
+            'service': ['service', 'staff', 'waiter', 'waitress', 'server', 'friendly', 'helpful', 'attentive'],
+            'atmosphere': ['atmosphere', 'ambiance', 'decor', 'music', 'lighting', 'cozy', 'romantic'],
+            'price': ['price', 'cost', 'expensive', 'cheap', 'affordable', 'value', 'money'],
+            'location': ['location', 'parking', 'convenient', 'accessible'],
+            'cleanliness': ['clean', 'dirty', 'hygiene', 'sanitary', 'tidy']
         }
         
-        # Count keyword matches for each topic
         topic_scores = {}
         for topic, keywords in topic_keywords.items():
             score = sum(1 for keyword in keywords if keyword in text_lower)
             topic_scores[topic] = score
         
-        # Return the topic with the highest score
         if topic_scores:
             best_topic = max(topic_scores, key=topic_scores.get)
             if topic_scores[best_topic] > 0:
                 return best_topic
         
-        # If no keywords found, try to infer from context
-        if any(word in text_lower for word in ['great', 'good', 'excellent', 'amazing', 'wonderful']):
-            return 'service'  # Default to service for positive reviews
-        elif any(word in text_lower for word in ['bad', 'terrible', 'awful', 'disappointing']):
-            return 'service'  # Default to service for negative reviews
-        
-        return 'service'  # Default fallback
+        return 'service'
     
     def summarize_text(self, text: str) -> str:
-        """Summarize text using Hugging Face models"""
-        if not self.summarization_pipeline:
-            return self._summarize_fallback(text)
-        
+        """Summarize text using remote Hugging Face API"""
         try:
             start_time = time.time()
             
-            # Truncate text if too long
-            if len(text) > 1000:
-                text = text[:1000]
+            # Summarization works best with longer text
+            if len(text) < 50:
+                return text
             
-            result = self.summarization_pipeline(text)
+            # Truncate if too long
+            text = text[:1024]
             
-            if isinstance(result, list) and len(result) > 0:
-                summary = result[0]['summary_text']
+            result = self._query_huggingface(
+                self.models['summarization'],
+                {
+                    "inputs": text,
+                    "parameters": {
+                        "max_length": 100,
+                        "min_length": 20
+                    }
+                }
+            )
+            
+            if result and isinstance(result, list) and len(result) > 0:
+                summary = result[0].get('summary_text', text[:100] + "...")
             else:
                 summary = self._summarize_fallback(text)
             
@@ -235,37 +212,30 @@ class AIService:
             return self._summarize_fallback(text)
     
     def _summarize_fallback(self, text: str) -> str:
-        """Fallback summarization using simple text truncation"""
+        """Fallback summarization"""
         if len(text) <= 100:
             return text
-        
-        # Take first 100 characters and add ellipsis
         return text[:100] + "..."
     
     def generate_reply(self, review_text: str, rating: int, sentiment: str, summary: str = None) -> Dict[str, Any]:
-        """Generate dynamic reply using Hugging Face text generation"""
+        """Generate dynamic reply using DeepSeek"""
         try:
             start_time = time.time()
             
-            # Analyze the review with multiple models
+            # Analyze the review
             sentiment_analysis = self.analyze_sentiment(review_text)
             topic = self.extract_topic(review_text)
             
-            # Generate summary if not provided
             if summary is None:
                 summary = self.summarize_text(review_text)
             
-            # Create a comprehensive prompt for the AI
-            prompt = self._create_dynamic_prompt(review_text, rating, sentiment, summary, sentiment_analysis, topic)
-            
-            # Generate reply using Hugging Face
-            reply = self._generate_with_huggingface(prompt, review_text, rating, sentiment, topic)
-            
+            # Try to generate reply using DeepSeek
+            reply = self._generate_with_deepseek(review_text, rating, sentiment_analysis, topic)
+            print("ai reply:", reply)
             processing_time = time.time() - start_time
             self.performance_metrics['reply_generation_time'].append(processing_time)
             
-            # Create reasoning log
-            reasoning_log = f"AI Analysis: {sentiment} sentiment detected | Summary: {summary[:50]}... | AI-Powered Reply: Generated using Hugging Face text generation | Rating: {rating}/5, Method: Dynamic AI generation with topic awareness"
+            reasoning_log = f"AI Analysis: {sentiment_analysis} sentiment | Topic: {topic} | Rating: {rating}/5 | Method: DeepSeek V3.2"
             
             return {
                 "reply": reply,
@@ -274,135 +244,159 @@ class AIService:
             
         except Exception as e:
             logger.error(f"Error in reply generation: {str(e)}")
-            fallback_reply = self._generate_fallback_reply(review_text, rating, sentiment)
+            fallback_reply = self._generate_contextual_reply(review_text, rating, sentiment, "service")
             return {
                 "reply": fallback_reply,
-                "reasoning_log": f"Fallback reply generated due to AI service error: {str(e)}"
+                "reasoning_log": f"Fallback reply generated"
             }
     
-    def _create_dynamic_prompt(self, review_text: str, rating: int, sentiment: str, 
-                              summary: str, sentiment_analysis: Dict, topic: str) -> str:
-        """Create a dynamic prompt for AI reply generation"""
-        
-        # Create context-aware prompt
-        context = f"""
-Customer Review: "{review_text}"
-Rating: {rating}/5
-Sentiment: {sentiment}
-Topic: {topic}
-Summary: {summary}
+    def _generate_with_deepseek(self, review_text: str, rating: int, sentiment: str, topic: str) -> str:
+        """Generate reply using DeepSeek V3.2 via OpenAI-compatible API"""
+        try:
+            # Create system prompt
+            system_prompt = """You are a professional restaurant manager responding to customer reviews. 
+Your responses should be:
+- Brief and concise (2-3 sentences maximum)
+- Professional and courteous
+- Address the specific points mentioned in the review
+- For positive reviews: express gratitude and welcome them back
+- For negative reviews: apologize sincerely and offer to make things right
+- Never make excuses, just acknowledge and commit to improvement
+- Don't mention any contact details like phone and email"""
 
-Restaurant Manager Response:"""
-        
-        return context.strip()
+            # Create user prompt based on sentiment
+            if sentiment == "positive" and rating >= 4:
+                user_prompt = f"Write a brief, grateful response (2-3 sentences) to this positive customer review:\n\n{review_text}"
+            elif sentiment == "negative" and rating <= 2:
+                user_prompt = f"Write a brief, apologetic response (2-3 sentences) to this negative customer complaint, offering to help:\n\n{review_text}"
+            else:
+                user_prompt = f"Write a brief, professional response (2-3 sentences) to this customer feedback:\n\n{review_text}"
+            
+            print(f"DeepSeek prompt - Sentiment: {sentiment}, Rating: {rating}")
+            
+            # Call DeepSeek API via OpenAI client
+            completion = self.openai_client.chat.completions.create(
+                model=self.models['text_generation'],
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.7,
+                max_tokens=150,
+                top_p=0.9,
+            )
+            
+            # Extract reply
+            reply = completion.choices[0].message.content.strip()
+            
+            print(f"DeepSeek raw response: {reply}")
+            
+            # Clean and validate the reply
+            cleaned_reply = self._clean_deepseek_reply(reply, sentiment)
+            
+            if cleaned_reply and len(cleaned_reply) >= 30:
+                print("✓ Using DeepSeek-generated reply")
+                return cleaned_reply
+            else:
+                print("✗ DeepSeek reply too short, using fallback")
+                return self._generate_contextual_reply(review_text, rating, sentiment, topic)
+                
+        except Exception as e:
+            logger.error(f"Error calling DeepSeek API: {str(e)}")
+            print(f"✗ DeepSeek API error: {str(e)}")
+            return self._generate_contextual_reply(review_text, rating, sentiment, topic)
     
-    def _generate_with_huggingface(self, prompt: str, review_text: str, rating: int, 
-                                  sentiment: str, topic: str) -> str:
-        """Generate reply using Hugging Face text generation"""
-        # For now, use the improved fallback method which generates better responses
-        # The Hugging Face text generation needs more tuning for this specific use case
-        return self._generate_fallback_reply(review_text, rating, sentiment)
-    
-    def _clean_generated_reply(self, generated_text: str, prompt: str) -> str:
-        """Clean and format the generated reply"""
-        if not generated_text:
+    def _clean_deepseek_reply(self, reply: str, sentiment: str) -> str:
+        """Clean and validate DeepSeek-generated reply"""
+        if not reply:
             return ""
         
-        # Remove the prompt from the generated text
-        reply = generated_text.replace(prompt, "").strip()
+        # Remove any quotes if wrapped
+        reply = reply.strip()
+        if reply.startswith('"') and reply.endswith('"'):
+            reply = reply[1:-1].strip()
+        if reply.startswith("'") and reply.endswith("'"):
+            reply = reply[1:-1].strip()
         
-        # Remove any remaining metadata
-        lines = reply.split('\n')
-        cleaned_lines = []
+        # Remove any meta-text
+        unwanted_prefixes = [
+            "Here's a response:", "Here is a response:", "Response:",
+            "Dear customer,", "Dear Customer,",
+            "Restaurant Manager:", "Manager:"
+        ]
         
-        for line in lines:
-            line = line.strip()
-            if (line and 
-                not line.startswith('Customer Review:') and
-                not line.startswith('Rating:') and
-                not line.startswith('Sentiment:') and
-                not line.startswith('Topic:') and
-                not line.startswith('Summary:') and
-                not line.startswith('Restaurant Manager Response:')):
-                cleaned_lines.append(line)
+        for prefix in unwanted_prefixes:
+            if reply.startswith(prefix):
+                reply = reply[len(prefix):].strip()
         
-        reply = ' '.join(cleaned_lines)
+        # Ensure proper capitalization
+        if reply:
+            reply = reply[0].upper() + reply[1:] if len(reply) > 1 else reply.upper()
         
-        # Ensure it starts with a proper restaurant response
-        if not reply.lower().startswith(('thank you', 'we appreciate', 'we are sorry', 'we apologize')):
-            reply = "Thank you for your feedback! " + reply
-        
-        # Ensure it ends with proper punctuation
+        # Ensure proper ending punctuation
         if reply and not reply.endswith(('.', '!', '?')):
             reply += '.'
         
-        # Limit length
-        if len(reply) > 300:
-            reply = reply[:300].rsplit(' ', 1)[0] + '.'
+        # Limit to 3 sentences max
+        sentences = reply.split('. ')
+        if len(sentences) > 3:
+            reply = '. '.join(sentences[:3]) + '.'
+        
+        # Validate length (should be concise)
+        if len(reply) > 350:
+            reply = reply[:350]
+            last_period = reply.rfind('.')
+            if last_period > 100:
+                reply = reply[:last_period + 1]
         
         return reply
     
-    def _generate_fallback_reply(self, review_text: str, rating: int, sentiment: str) -> str:
-        """Generate dynamic fallback reply using AI analysis"""
-        # Use Hugging Face models for better analysis
-        topic = self.extract_topic(review_text)
-        sentiment_analysis = self.analyze_sentiment(review_text)
-        summary = self.summarize_text(review_text)
+    def _generate_contextual_reply(self, review_text: str, rating: int, sentiment: str, topic: str) -> str:
+        """Generate contextual reply based on analysis (fallback method)"""
         
-        # Create more contextual responses based on rating and content
         if sentiment == "positive":
             if rating >= 4:
                 responses = [
                     f"Thank you for your wonderful feedback! We're thrilled that you enjoyed our {topic} and look forward to serving you again!",
                     f"We're delighted to hear about your positive experience with our {topic}! Thank you for taking the time to share your feedback.",
-                    f"Thank you for your amazing review! We're so happy that you loved our {topic} and we can't wait to welcome you back!",
-                    f"We truly appreciate your kind words about our {topic}! Thank you for choosing us and we look forward to serving you again soon!"
+                    f"Thank you for your amazing review! We're so happy that you loved our {topic} and we can't wait to welcome you back!"
                 ]
             else:
                 responses = [
                     f"Thank you for your positive feedback about our {topic}! We appreciate your support and hope to see you again soon!",
-                    f"We're glad you had a good experience with our {topic}! Thank you for sharing your thoughts with us.",
-                    f"Thank you for your kind words about our {topic}! We value your feedback and look forward to serving you again."
+                    f"We're glad you had a good experience with our {topic}! Thank you for sharing your thoughts with us."
                 ]
         elif sentiment == "negative":
             if rating <= 2:
                 responses = [
                     f"Thank you for bringing this to our attention. We sincerely apologize for not meeting your expectations with our {topic}. Please contact us directly so we can address your concerns.",
-                    f"We're sorry to hear about your disappointing experience with our {topic}. We take all feedback seriously and would like to make this right. Please reach out to us directly.",
-                    f"Thank you for your honest feedback about our {topic}. We apologize for falling short of your expectations and would appreciate the opportunity to discuss this with you directly.",
-                    f"We're disappointed to hear about your experience with our {topic}. Your feedback is important to us, and we'd like to address your concerns personally. Please contact us."
+                    f"We're sorry to hear about your disappointing experience with our {topic}. We take all feedback seriously and would like to make this right.",
+                    f"We apologize for falling short of your expectations with our {topic}. Your feedback is important to us, and we'd like to address your concerns personally."
                 ]
             else:
                 responses = [
-                    f"Thank you for your feedback about our {topic}. We understand your concerns and would like to discuss this with you directly to make things right.",
-                    f"We appreciate you sharing your experience with our {topic}. We'd like to address your concerns and ensure you have a better experience next time."
+                    f"Thank you for your feedback about our {topic}. We'd like to discuss your concerns and ensure you have a better experience next time.",
+                    f"We appreciate you sharing your experience with our {topic} and will work to address your concerns."
                 ]
-        else:  # neutral
+        else:
             responses = [
-                f"Thank you for your feedback about our {topic}! We appreciate you taking the time to share your experience and will use your comments to continue improving our service.",
-                f"We value your input about our {topic}! Thank you for sharing your experience with us, and we'll use your feedback to enhance our service.",
-                f"Thank you for taking the time to review our {topic}! We appreciate your feedback and will continue working to provide the best possible experience.",
-                f"We're grateful for your honest feedback about our {topic}! Your input helps us improve, and we appreciate you sharing your experience with us."
+                f"Thank you for your feedback about our {topic}! We appreciate you taking the time to share your experience.",
+                f"We value your input about our {topic}! Thank you for sharing your thoughts with us.",
+                f"Thank you for reviewing our {topic}! Your feedback helps us continue improving."
             ]
         
-        import random
         return random.choice(responses)
     
     def search_similar_reviews(self, query: str, k: int = 5) -> List[Dict[str, Any]]:
-        """Search for similar reviews using TF-IDF and cosine similarity"""
+        """Search for similar reviews using TF-IDF"""
         if not self.tfidf_vectorizer or self.tfidf_matrix is None:
             return []
         
         try:
             start_time = time.time()
             
-            # Transform query to TF-IDF vector
             query_vector = self.tfidf_vectorizer.transform([query])
-            
-            # Calculate cosine similarities
             similarities = cosine_similarity(query_vector, self.tfidf_matrix).flatten()
-            
-            # Get top k similar reviews
             top_indices = similarities.argsort()[-k:][::-1]
             
             results = []
@@ -443,7 +437,7 @@ Restaurant Manager Response:"""
             logger.error(f"Error updating TF-IDF matrix: {str(e)}")
     
     def get_performance_metrics(self) -> Dict[str, Any]:
-        """Get performance metrics for monitoring"""
+        """Get performance metrics"""
         metrics = {}
         for key, times in self.performance_metrics.items():
             if times:
@@ -459,51 +453,35 @@ Restaurant Manager Response:"""
         return metrics
     
     def health_check(self) -> Dict[str, Any]:
-        """Check the health of AI services"""
+        """Check service health"""
         health = {
             'status': 'healthy',
-            'models_loaded': {
-                'sentiment': self.sentiment_pipeline is not None,
-                'summarization': self.summarization_pipeline is not None,
-                'text_generation': self.text_generation_pipeline is not None,
-                'topic_classification': self.topic_classification_pipeline is not None
-            },
+            'using_remote_models': True,
+            'text_generation_model': 'DeepSeek V3.2',
+            'api_token_configured': bool(self.hf_api_token),
             'performance_metrics': self.get_performance_metrics()
         }
         
-        # Check if any critical models are missing
-        if not any(health['models_loaded'].values()):
-            health['status'] = 'degraded'
-            health['message'] = 'No AI models loaded'
-        
         return health
     
-    def cleanup_cache(self):
-        """Clean up AI service cache and resources"""
+    def _initialize_search_index(self):
+        """Initialize search index with existing reviews"""
         try:
-            # Clear performance metrics
-            for key in self.performance_metrics:
-                self.performance_metrics[key].clear()
+            reviews = self._db_manager.execute_query(
+                "SELECT id, text FROM reviews WHERE text IS NOT NULL"
+            )
             
-            # Clear model cache
-            with self._cache_lock:
-                self._model_cache.clear()
-            
-            # Clear TF-IDF data
-            self.tfidf_vectorizer = None
-            self.tfidf_matrix = None
-            self.review_texts = []
-            self.review_ids = []
-            
-            logger.info("AI service cache cleaned up successfully")
+            if reviews:
+                reviews_data = [{'id': row[0], 'text': row[1]} for row in reviews]
+                self.update_tfidf_matrix(reviews_data)
+                logger.info(f"Search index initialized with {len(reviews)} reviews")
             
         except Exception as e:
-            logger.error(f"Error cleaning up AI service cache: {str(e)}")
+            logger.error(f"Error initializing search index: {str(e)}")
     
     def refresh_search_index(self):
         """Refresh the search index with current reviews"""
         try:
-            # Get all reviews from database
             reviews = self._db_manager.execute_query(
                 "SELECT id, text FROM reviews WHERE text IS NOT NULL"
             )
@@ -518,23 +496,23 @@ Restaurant Manager Response:"""
         except Exception as e:
             logger.error(f"Error refreshing search index: {str(e)}")
     
-    def _initialize_search_index(self):
-        """Initialize search index with existing reviews"""
+    def cleanup_cache(self):
+        """Clean up AI service cache and resources"""
         try:
-            # Get all reviews from database
-            reviews = self._db_manager.execute_query(
-                "SELECT id, text FROM reviews WHERE text IS NOT NULL"
-            )
+            # Clear performance metrics
+            for key in self.performance_metrics:
+                self.performance_metrics[key].clear()
             
-            if reviews:
-                reviews_data = [{'id': row[0], 'text': row[1]} for row in reviews]
-                self.update_tfidf_matrix(reviews_data)
-                logger.info(f"Search index initialized with {len(reviews)} reviews")
-            else:
-                logger.info("No reviews found for search index initialization")
-                
+            # Clear TF-IDF data
+            self.tfidf_vectorizer = None
+            self.tfidf_matrix = None
+            self.review_texts = []
+            self.review_ids = []
+            
+            logger.info("AI service cache cleaned up successfully")
+            
         except Exception as e:
-            logger.error(f"Error initializing search index: {str(e)}")
+            logger.error(f"Error cleaning up AI service cache: {str(e)}")
 
-# Create a global instance
+# Create global instance
 ai_service = AIService()

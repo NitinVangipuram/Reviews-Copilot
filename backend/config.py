@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     port: int = Field(default=8000, env="PORT")
     debug: bool = Field(default=False, env="DEBUG")
     reload: bool = Field(default=False, env="RELOAD")
+    huggingface_api_token: str = Field(default="", description="Hugging Face API Token")
     
     # Database Configuration
     database_url: str = Field(default="sqlite:///./reviews.db", env="DATABASE_URL")

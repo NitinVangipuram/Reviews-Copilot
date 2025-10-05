@@ -441,7 +441,6 @@ async def search_similar_reviews(
         
         # Search using AI service
         results = ai_service.search_similar_reviews(q, k)
-        
         return SearchResponse(
             query=q,
             results=results,
@@ -473,12 +472,8 @@ async def process_reviews(api_key: str = Depends(verify_api_key)):
         for review_id, text in reviews:
             try:
                 sentiment = ai_service.analyze_sentiment(text)
-                print(sentiment)
                 topic = ai_service.extract_topic(text)
-
-                # ✅ Convert dict to JSON string before saving
-                sentiment_json = json.dumps(sentiment)
-                success = db_manager.update_review_ai_data(review_id, sentiment_json, topic)
+                success = db_manager.update_review_ai_data(review_id, sentiment, topic)
                 if success:
                     processed_count += 1
 
